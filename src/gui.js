@@ -8420,6 +8420,26 @@ IDE_Morph.prototype.initializeCloud = function () {
     );
 };
 
+// StitchLAB (Moonraker) Integration
+
+IDE_Morph.prototype.checkStitchLabAvailability = function () {
+    // Check if Moonraker is available on the current host
+    var url = 'http://' + window.location.hostname + ':7125/server/info',
+        myself = this;
+    
+    fetch(url, { 
+        method: 'GET',
+        signal: AbortSignal.timeout(1000) // 1 second timeout
+    })
+        .then(response => {
+            myself.stitchlabAvailable = response.ok;
+        })
+        .catch(() => {
+            // Moonraker not available
+            myself.stitchlabAvailable = false;
+        });
+};
+
 IDE_Morph.prototype.createCloudAccount = function () {
     var world = this.world();
 
@@ -9071,6 +9091,12 @@ ProjectDialogMorph.prototype.init = function (ide, task) {
     this.task = task || 'open'; // String describing what do do (open, save)
     this.source = ide.source;
     this.projectList = []; // [{name: , thumb: , notes:}]
+    
+    // Check StitchLAB (Moonraker) availability if not already checked
+    if (ide.stitchlabAvailable === undefined) {
+        ide.stitchlabAvailable = true; // Assume available initially
+        ide.checkStitchLabAvailability(); // Check async for next time
+    }
 
     this.handle = null;
     this.srcBar = null;
@@ -9164,6 +9190,12 @@ ProjectDialogMorph.prototype.buildContents = function () {
             this.addSourceButton('local', localize('Browser'), 'globe');
         }
     }
+    
+    // StitchLAB: Add button for Moonraker storage if available
+    if (this.ide.stitchlabAvailable) {
+        this.addSourceButton('stitchlab', localize('StitchLAB'), 'file');
+    }
+    
     this.addSourceButton('disk', localize('Computer'), 'storage');
 
     this.srcBar.fixLayout();
@@ -9532,6 +9564,22 @@ ProjectDialogMorph.prototype.setSource = function (source) {
             return;
         }
         break;
+    case 'stitchlab':
+        msg = this.ide.showMessage('Updating\nproject list...');
+        this.projectList = [];
+        this.getStitchLabProjectList(
+            projects => {
+                if (this.source === 'stitchlab') {
+                    this.installStitchLabProjectList(projects);
+                }
+                msg.destroy();
+            },
+            err => {
+                msg.destroy();
+                this.ide.showMessage('StitchLAB Error: ' + err, 3);
+            }
+        );
+        return;
     }
 
     this.listField.destroy();
@@ -9784,12 +9832,35 @@ ProjectDialogMorph.prototype.addScene = function () {
         src = this.ide.getURL(this.ide.resourceURL('Examples', proj.fileName));
         this.ide.openProjectString(src);
         this.destroy();
-
+    } else if (this.source === 'stitchlab') {
+        this.addStitchLabScene(proj);
     } else { // 'local'
         this.ide.source = null;
         this.ide.openProjectName(proj.name);
         this.destroy();
     }
+};
+
+ProjectDialogMorph.prototype.addStitchLabScene = function (proj) {
+    var url = this.getMoonrakerURL() + 
+              '/server/files/gcodes/turtlestitch_projects/' + 
+              encodeURIComponent(proj.filename);
+    
+    fetch(url)
+        .then(response => {
+            if (!response.ok) {
+                throw new Error('HTTP ' + response.status);
+            }
+            return response.text();
+        })
+        .then(xmlString => {
+            this.ide.source = 'stitchlab';
+            this.ide.openProjectString(xmlString);
+        })
+        .catch(err => {
+            this.ide.showMessage('Add scene failed: ' + err.message, 3);
+        });
+    this.destroy();
 };
 
 ProjectDialogMorph.prototype.openProject = function () {
@@ -9804,7 +9875,8 @@ ProjectDialogMorph.prototype.openProject = function () {
         src = this.ide.getURL(this.ide.resourceURL('Examples', proj.fileName));
         this.ide.backup(() => this.ide.openProjectString(src));
         this.destroy();
-
+    } else if (this.source === 'stitchlab') {
+        this.openStitchLabProject(proj);
     } else { // 'local'
         this.ide.source = null;
         this.ide.backup(() => this.ide.openProjectName(proj.name));
@@ -9854,6 +9926,31 @@ ProjectDialogMorph.prototype.rawOpenCloudProject = function (proj, delta) {
     this.destroy();
 };
 
+ProjectDialogMorph.prototype.openStitchLabProject = function (proj) {
+    var url = this.getMoonrakerURL() + 
+              '/server/files/gcodes/turtlestitch_projects/' + 
+              encodeURIComponent(proj.filename);
+    
+    this.ide.backup(() => {
+        fetch(url)
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error('HTTP ' + response.status);
+                }
+                return response.text();
+            })
+            .then(xmlString => {
+                this.ide.source = 'stitchlab';
+                this.ide.openProjectString(xmlString);
+                this.ide.setProjectName(proj.name);
+            })
+            .catch(err => {
+                this.ide.showMessage('Open failed: ' + err.message, 3);
+            });
+    });
+    this.destroy();
+};
+
 ProjectDialogMorph.prototype.saveProject = function () {
     var name = this.nameField.contents().text.text,
         notes = this.notesText.text;
@@ -9885,6 +9982,25 @@ ProjectDialogMorph.prototype.saveProject = function () {
             this.ide.exportProject(name);
             this.ide.source = 'disk';
             this.destroy();
+        } else if (this.source === 'stitchlab') {
+            if (detect(
+                    this.projectList,
+                    item => item.filename === name + '.xml'
+                )) {
+                this.ide.confirm(
+                    localize(
+                        'Are you sure you want to replace'
+                    ) + '\n"' + name + '"?',
+                    'Replace Project',
+                    () => {
+                        this.ide.setProjectName(name);
+                        this.saveStitchLabProject();
+                    }
+                );
+            } else {
+                this.ide.setProjectName(name);
+                this.saveStitchLabProject();
+            }
         }
     }
 };
@@ -9893,6 +10009,162 @@ ProjectDialogMorph.prototype.saveCloudProject = function () {
     this.ide.source = 'cloud';
     this.ide.saveProjectToCloud();
     this.destroy();
+};
+
+// StitchLAB Project Management
+
+ProjectDialogMorph.prototype.getMoonrakerURL = function () {
+    // Use current hostname with Moonraker port
+    return 'http://' + window.location.hostname + ':7125';
+};
+
+ProjectDialogMorph.prototype.getStitchLabProjectList = function (callback, errorCallback) {
+    var url = this.getMoonrakerURL() + '/server/files/directory?path=gcodes/turtlestitch_projects';
+    
+    fetch(url)
+        .then(response => {
+            if (!response.ok) {
+                throw new Error('HTTP ' + response.status);
+            }
+            return response.json();
+        })
+        .then(data => {
+            var projects = data.result.files
+                .filter(f => f.filename.endsWith('.xml'))
+                .map(f => ({
+                    filename: f.filename,
+                    name: f.filename.replace(/\\.xml$/, ''),
+                    modified: f.modified,
+                    size: f.size
+                }));
+            callback(projects);
+        })
+        .catch(err => {
+            errorCallback(err.message || 'Connection failed');
+        });
+};
+
+ProjectDialogMorph.prototype.installStitchLabProjectList = function (projects) {
+    this.projectList = projects.sort((a, b) => b.modified - a.modified);
+    this.listField.destroy();
+    this.listField = new ListMorph(
+        this.projectList,
+        this.projectList.length > 0 ? element => element.name : null,
+        null,
+        () => this.ok()
+    );
+    
+    this.fixListFieldItemColors();
+    this.listField.fixLayout = nop;
+    this.listField.edge = InputFieldMorph.prototype.edge;
+    this.listField.fontSize = InputFieldMorph.prototype.fontSize;
+    this.listField.typeInPadding = InputFieldMorph.prototype.typeInPadding;
+    this.listField.contrast = InputFieldMorph.prototype.contrast;
+    this.listField.render = InputFieldMorph.prototype.render;
+    this.listField.drawRectBorder = InputFieldMorph.prototype.drawRectBorder;
+    
+    this.listField.action = (item) => {
+        if (item === undefined) { return; }
+        if (this.nameField) {
+            this.nameField.setContents(item.name || '');
+        }
+        if (this.task === 'open' || this.task === 'add') {
+            this.loadStitchLabProjectPreview(item);
+        }
+        this.edit();
+    };
+    
+    this.body.add(this.listField);
+    this.shareButton.hide();
+    this.unshareButton.hide();
+    this.publishButton.hide();
+    this.unpublishButton.hide();
+    this.deleteButton.show();
+    
+    if (this.task === 'open' || this.task === 'add') {
+        this.recoverButton.hide();
+    }
+    
+    this.buttons.fixLayout();
+    this.fixLayout();
+    if (this.task === 'open' || this.task === 'add') {
+        this.clearDetails();
+    }
+};
+
+ProjectDialogMorph.prototype.loadStitchLabProjectPreview = function (item) {
+    var url = this.getMoonrakerURL() + 
+              '/server/files/gcodes/turtlestitch_projects/' + 
+              encodeURIComponent(item.filename);
+    
+    fetch(url)
+        .then(response => response.text())
+        .then(xmlString => {
+            var xml = this.ide.serializer.parse(xmlString);
+            this.notesText.text = xml.childNamed('notes').contents || '';
+            this.notesText.rerender();
+            this.notesField.contents.adjustBounds();
+            this.preview.texture = xml.childNamed('thumbnail').contents || null;
+            this.preview.cachedTexture = null;
+            this.preview.rerender();
+        })
+        .catch(err => {
+            this.ide.showMessage('Error loading preview: ' + err.message, 2);
+        });
+};
+
+ProjectDialogMorph.prototype.saveStitchLabProject = function () {
+    var name = this.ide.setProjectName(this.ide.getProjectName()),
+        xml,
+        blob,
+        formData;
+
+    // Use the same serialization path as exportProject to ensure serializer
+    // has a root project and sprites populated.
+    this.ide.scene.captureGlobalSettings();
+    try {
+        xml = this.ide.serializer.serialize(
+            new Project(this.ide.scenes, this.ide.scene)
+        );
+    } catch (err) {
+        this.ide.scene.applyGlobalSettings();
+        console.error('StitchLAB serialize error:', err);
+        this.ide.showMessage('Save failed: ' + err.message, 3);
+        return;
+    }
+    this.ide.scene.applyGlobalSettings();
+
+    blob = new Blob([xml], { type: 'application/xml' });
+    formData = new FormData();
+
+    console.log('StitchLAB Save:', name, 'URL:', this.getMoonrakerURL());
+
+    formData.append('file', blob, name + '.xml');
+    formData.append('root', 'gcodes');
+    formData.append('path', 'turtlestitch_projects');
+
+    fetch(this.getMoonrakerURL() + '/server/files/upload', {
+        method: 'POST',
+        body: formData
+    })
+        .then(response => {
+            console.log('Upload response:', response.status, response.ok);
+            if (!response.ok) {
+                throw new Error('HTTP ' + response.status);
+            }
+            return response.json();
+        })
+        .then(data => {
+            console.log('Upload success:', data);
+            this.ide.source = 'stitchlab';
+            this.ide.recordSavedChanges();
+            this.ide.showMessage('Project saved to StitchLAB!', 2);
+            this.destroy();
+        })
+        .catch(err => {
+            console.error('Upload error:', err);
+            this.ide.showMessage('Save failed: ' + err.message, 3);
+        });
 };
 
 ProjectDialogMorph.prototype.deleteProject = function () {
@@ -9921,6 +10193,37 @@ ProjectDialogMorph.prototype.deleteProject = function () {
                     },
                     this.ide.cloudError()
                 )
+            );
+        }
+    } else if (this.source === 'stitchlab') { // StitchLAB
+        if (this.listField.selected) {
+            proj = this.listField.selected;
+            this.ide.confirm(
+                localize(
+                    'Are you sure you want to delete'
+                ) + '\n"' + proj.name + '"?',
+                'Delete Project',
+                () => {
+                    var url = this.getMoonrakerURL() + 
+                              '/server/files/gcodes/turtlestitch_projects/' + 
+                              encodeURIComponent(proj.filename);
+                    fetch(url, { method: 'DELETE' })
+                        .then(response => {
+                            if (!response.ok) {
+                                throw new Error('HTTP ' + response.status);
+                            }
+                            return response.json();
+                        })
+                        .then(() => {
+                            this.ide.hasChangedMedia = true;
+                            idx = this.projectList.indexOf(proj);
+                            this.projectList.splice(idx, 1);
+                            this.installStitchLabProjectList(this.projectList);
+                        })
+                        .catch(err => {
+                            this.ide.showMessage('Delete failed: ' + err.message, 3);
+                        });
+                }
             );
         }
     } else { // 'local, examples'

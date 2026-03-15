@@ -1595,8 +1595,16 @@ IDE_Morph.prototype.createStatusDisplay = function () {
         function () { myself.downloadDST(); },
         'Export as Tajima/DST'
     );
-    downloadDSTButton.newLines = 2.7;
+    downloadDSTButton.newLines = 1.7;
     elements.push(downloadDSTButton);
+
+    var downloadGCODEButton = new PushButtonMorph(
+        null,
+        function () { myself.downloadGCODE(); },
+        'Export as G-code (Klipper)'
+    );
+    downloadGCODEButton.newLines = 2.7;
+    elements.push(downloadGCODEButton);
 
     if (DEBUG) {
 		elements.push(' DEBUG MODE: true');
@@ -1724,6 +1732,60 @@ IDE_Morph.prototype.downloadDST = function() {
     expUintArr = this.stage.turtleShepherd.toDST(name);
     blob = new Blob([expUintArr], {type: 'application/octet-stream'});
     saveAs(blob, name + '.dst');
+};
+
+// G-code export for Klipper embroidery machines
+IDE_Morph.prototype.downloadGCODE = function() {
+    var myself = this,
+        name = this.projectName ? this.projectName : 'turtlestitch',
+        gcode,
+        moonrakerUrl,
+        formData,
+        blob;
+
+    try {
+        console.log('downloadGCODE called');
+        console.log('turtleShepherd:', this.stage.turtleShepherd);
+        console.log('cache length:', this.stage.turtleShepherd.cache.length);
+        
+        gcode = this.stage.turtleShepherd.toGCODE();
+        console.log('gcode result:', gcode ? 'has content' : 'null/empty');
+    } catch (e) {
+        console.error('Error generating G-code:', e);
+        alert('Error generating G-code: ' + e.message);
+        return;
+    }
+
+    if (!gcode) {
+        alert('No stitches to export! Please draw something first.');
+        return;
+    }
+
+    // Auto-detect Moonraker URL from current hostname
+    moonrakerUrl = 'http://' + (window.location.hostname || 'localhost') + ':7125';
+
+    console.log('G-code export: uploading to ' + moonrakerUrl);
+
+    formData = new FormData();
+    formData.append('file', new Blob([gcode], {type: 'text/plain'}), name + '.gcode');
+
+    fetch(moonrakerUrl + '/server/files/upload', {
+        method: 'POST',
+        body: formData
+    }).then(function(response) {
+        if (!response.ok) {
+            throw new Error('Upload failed with status ' + response.status);
+        }
+        return response.json();
+    }).then(function(result) {
+        console.log('Upload success:', result);
+        alert('G-code uploaded to printer successfully!');
+    }).catch(function(err) {
+        console.error('Upload failed:', err);
+        alert('Upload failed: ' + err.message + '\nDownloading file instead.');
+        blob = new Blob([gcode], {type: 'text/plain'});
+        saveAs(blob, name + '.gcode');
+    });
 };
 
 // PNG export
@@ -2305,6 +2367,12 @@ IDE_Morph.prototype.projectMenu = function () {
             'Export as Tajima/DST',
             function() { myself.downloadDST(); },
             'Export current drawing as DST/Tajima Embroidery file'
+    );
+
+    menu.addItem(
+            'Export as G-code (Klipper)',
+            function() { myself.downloadGCODE(); },
+            'Export for Klipper-based embroidery machines'
     );
 
     if (DEBUG) {
