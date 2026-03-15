@@ -11475,6 +11475,11 @@ StageMorph.prototype.userMenu = function () {
             'exportTrailsLogAsEXP',
             'export pen trails\nas EXP embroidery file'
         );
+        menu.addItem(
+            'gcode...',
+            'exportTrailsLogAsGCODE',
+            'export pen trails\nas Klipper-friendly G-code'
+        );
     }
     return menu;
 };
@@ -11633,6 +11638,51 @@ StageMorph.prototype.exportTrailsLogAsDST = function () {
 StageMorph.prototype.exportTrailsLogAsEXP = function () {
     var ide = this.parentThatIsA(IDE_Morph);
     exportEmbroidery(this.trailsLog, ide.getProjectName() || this.name, 'exp');
+};
+
+StageMorph.prototype.exportTrailsLogAsGCODE = function () {
+    var ide = this.parentThatIsA(IDE_Morph),
+        name = ide.getProjectName() || this.name,
+        storedUrl = (typeof localStorage !== 'undefined') ? localStorage.getItem('ts_moonraker_url') : '',
+        storedKey = (typeof localStorage !== 'undefined') ? localStorage.getItem('ts_moonraker_api_key') : '',
+        url,
+        apiKey,
+        options = {};
+
+    url = window.prompt(
+        'Enter Moonraker URL to upload (leave blank to download the G-code file).',
+        storedUrl || 'http://localhost:7125'
+    );
+
+    if (url === null) {
+        return;
+    }
+
+    if (url && url.trim()) {
+        if (typeof localStorage !== 'undefined') {
+            localStorage.setItem('ts_moonraker_url', url.trim());
+        }
+        apiKey = window.prompt(
+            'Moonraker API key (leave blank if not required).',
+            storedKey || ''
+        );
+
+        if (apiKey === null) {
+            return;
+        }
+
+        if (typeof localStorage !== 'undefined') {
+            localStorage.setItem('ts_moonraker_api_key', apiKey);
+        }
+
+        options.moonraker = {
+            url: url.trim(),
+            apiKey: apiKey || '',
+            path: 'gcodes'
+        };
+    }
+
+    exportEmbroideryGCode(this.trailsLog, name, options);
 };
 
 StageMorph.prototype.trailsLogAsSVG = function () {

@@ -55,29 +55,43 @@ colors =
  */
 
 
-function exportEmbroidery(trailsLog, name = 'unnamed', type = 'dst') {
+function buildEmbroideryCache(trailsLog) {
     var cache = [],
-        bottomLeft = trailsLog[0][0],
-        topRight = bottomLeft,
-        box,
+        bottomLeft,
+        topRight,
         p1, p2, lastPoint,
         steps = 0,
         color,
         lastColor = new Color(),
         clr = {r: lastColor.r, g: lastColor.g, b: lastColor.b, a: lastColor.a},
-        colors = [clr],
-        dta, blob;
+        colors = [clr];
 
-    // determine bounding box and offset
+    if (!trailsLog || trailsLog.length === 0) {
+        return {
+            cache: [],
+            bottomLeft: new Point(0, 0),
+            topRight: new Point(0, 0),
+            steps: 0,
+            colors: colors
+        };
+    }
+
+    bottomLeft = trailsLog[0][0];
+        topRight = bottomLeft,
+        p1, p2, lastPoint,
+        steps = 0,
+        color,
+        lastColor = new Color(),
+        clr = {r: lastColor.r, g: lastColor.g, b: lastColor.b, a: lastColor.a},
+        colors = [clr];
+
     trailsLog.forEach(line => {
         bottomLeft = bottomLeft.min(line[0]);
         bottomLeft = bottomLeft.min(line[1]);
         topRight = topRight.max(line[0]);
         topRight = topRight.max(line[1]);
     });
-    box = bottomLeft.corner(topRight);
 
-    // create the cache
     lastPoint = trailsLog[0][1];
     trailsLog.forEach(line => {
         p1 = line[0];
@@ -99,7 +113,7 @@ function exportEmbroidery(trailsLog, name = 'unnamed', type = 'dst') {
                 cache.push({
                     cmd: "color",
                     color: clr,
-                    thread: 1 // colorIndex
+                    thread: 1
                 });
                 lastColor = color;
             }
@@ -113,6 +127,27 @@ function exportEmbroidery(trailsLog, name = 'unnamed', type = 'dst') {
             lastPoint = p2;
         }
     });
+
+    return {
+        cache: cache,
+        bottomLeft: bottomLeft,
+        topRight: topRight,
+        steps: steps,
+        colors: colors,
+        box: bottomLeft.corner(topRight),
+        firstPoint: trailsLog[0][0]
+    };
+}
+
+function exportEmbroidery(trailsLog, name = 'unnamed', type = 'dst') {
+    var cacheData = buildEmbroideryCache(trailsLog),
+        cache = cacheData.cache,
+        bottomLeft = cacheData.bottomLeft,
+        topRight = cacheData.topRight,
+        box = cacheData.box,
+        steps = cacheData.steps,
+        colors = cacheData.colors,
+        dta, blob;
 
     if (type === 'dst') {
         dta = toDST(
@@ -426,6 +461,147 @@ function toDST(
         expUintArr[i] = Math.round(expArr[i]);
     }
     return expUintArr;
+}
+
+function toGCODE(cacheData, options) {
+    var cache = cacheData.cache,
+        originPoint = options.origin === 'first-point' ? cacheData.firstPoint : cacheData.bottomLeft,
+        ppm = options.pixelsPerMillimeter || 5,
+        zStep = options.zPerStitchMm || 5,
+        startZ = options.startZMm || 0,
+        travelFeed = options.travelFeed || 6000,
+        stitchFeed = options.stitchFeed || 1800,
+        currentZ = startZ,
+        lines = [],
+        i,
+        entry,
+        x,
+        y,
+        line;
+
+    lines.push('; TurtleStitch Klipper G-code export');
+    lines.push('; Z increases by ' + zStep + 'mm per stitch');
+    lines.push('G21');
+    lines.push('G90');
+    lines.push('G92 Z' + startZ.toFixed(3));
+
+    for (i = 0; i < cache.length; i++) {
+        entry = cache[i];
+
+        if (entry.cmd === 'color') {
+            lines.push('; color r:' + entry.color.r + ' g:' + entry.color.g + ' b:' + entry.color.b);
+            continue;
+        }
+
+        x = (entry.x - originPoint.x) / ppm;
+        y = (entry.y - originPoint.y) / ppm;
+
+        if (entry.penDown) {
+            currentZ += zStep;
+            line = 'G1 X' + x.toFixed(3) + ' Y' + y.toFixed(3) + ' Z' + currentZ.toFixed(3) + ' F' + stitchFeed;
+        } else {
+            line = 'G0 X' + x.toFixed(3) + ' Y' + y.toFixed(3) + ' F' + travelFeed;
+        }
+
+        lines.push(line);
+    }
+
+    lines.push('M400');
+    lines.push('M84');
+
+    return lines.join('\n');
+}
+
+function uploadGCodeToMoonraker(name, gcodeText, uploadOptions) {
+    var url = uploadOptions.url ? uploadOptions.url.replace(/\/$/, '') : '',
+        headers = {},
+        formData,
+        path;
+
+    if (!url) {
+        return Promise.reject(new Error('No Moonraker URL provided'));
+    }
+
+    formData = new FormData();
+    formData.append('file', new Blob([gcodeText], {type: 'text/plain'}), name + '.gcode');
+
+    path = uploadOptions.path || 'gcodes';
+    if (path) {
+        formData.append('path', path);
+    }
+
+    if (uploadOptions.apiKey) {
+        headers['X-Api-Key'] = uploadOptions.apiKey;
+    }
+
+    return fetch(url + '/server/files/upload', {
+        method: 'POST',
+        body: formData,
+        headers: headers
+    }).then(response => {
+        if (!response.ok) {
+            throw new Error('Moonraker upload failed with status ' + response.status);
+        }
+        return response.json ? response.json() : response;
+    });
+}
+
+function exportEmbroideryGCode(trailsLog, name = 'unnamed', options = {}) {
+    var cfg = Object.assign({
+            pixelsPerMillimeter: 5,
+            zPerStitchMm: 5,
+            startZMm: 0,
+            travelFeed: 6000,
+            stitchFeed: 1800,
+            origin: 'bottom-left',
+            moonraker: null,
+            downloadFallback: true
+        }, options || {}),
+        cacheData,
+        gcode,
+        blob,
+        moonrakerUrl;
+
+    // Check for empty drawing
+    if (!trailsLog || trailsLog.length === 0) {
+        alert('No stitches to export! Please draw something first.');
+        return;
+    }
+
+    cacheData = buildEmbroideryCache(trailsLog);
+    gcode = toGCODE(cacheData, cfg);
+
+    // Auto-detect Moonraker URL from current hostname
+    if (!cfg.moonraker) {
+        moonrakerUrl = 'http://' + (window.location.hostname || 'localhost') + ':7125';
+        cfg.moonraker = { url: moonrakerUrl, path: 'gcodes' };
+    }
+
+    console.log('G-code export: ' + cacheData.cache.length + ' commands, uploading to ' + cfg.moonraker.url);
+
+    if (cfg.moonraker && cfg.moonraker.url) {
+        uploadGCodeToMoonraker(name, gcode, cfg.moonraker)
+            .then(response => {
+                console.log('Upload success:', response);
+                if (cfg.moonraker.onSuccess) {
+                    cfg.moonraker.onSuccess();
+                } else {
+                    alert('G-code uploaded to printer successfully!\n' + cacheData.steps + ' stitches');
+                }
+            })
+            .catch(err => {
+                console.error('Upload failed:', err);
+                alert('Upload failed: ' + err.message + '\nDownloading file instead.');
+                if (cfg.downloadFallback) {
+                    blob = new Blob([gcode], {type: 'text/plain'});
+                    saveAs(blob, name + '.gcode');
+                }
+            });
+        return;
+    }
+
+    blob = new Blob([gcode], {type: 'text/plain'});
+    saveAs(blob, name + '.gcode');
 }
 
 function toEXP(cache, pixels_per_millimeter = 5, ignoreColors = true) {

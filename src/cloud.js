@@ -192,11 +192,24 @@ Cloud.prototype.request = function (
         request.onreadystatechange = function () {
             if (request.readyState === 4) {
                 if (request.responseText) {
-                    var response =
-                        (!wantsRawResponse ||
-                        (request.responseText.indexOf('{"errors"') === 0)) ?
-                            JSON.parse(request.responseText) :
-                            request.responseText;
+                    var responseText = request.responseText,
+                        response;
+
+                    try {
+                        response = (!wantsRawResponse ||
+                            (responseText.indexOf('{"errors"') === 0)) ?
+                            JSON.parse(responseText) :
+                            responseText;
+                    } catch (parseErr) {
+                        if (onError) {
+                            onError.call(
+                                null,
+                                parseErr.message || Cloud.genericErrorMessage,
+                                errorMsg
+                            );
+                        }
+                        return;
+                    }
 
                     if (response.errors) {
                        onError.call(
