@@ -1,3 +1,8 @@
+> **This is a fork of [TurtleStitch](https://github.com/backface/turtlestitch)** modified for the [StitchLabOS](https://github.com/prntr/StitchlabOS) embroidery project.
+>
+> Changes from upstream:
+> - Moonraker integration and Klipper G-code export for direct machine control
+> - Improved robustness of cloud requests and embroidery cache
 
 # TurtleStitch
 
